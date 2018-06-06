@@ -151,7 +151,14 @@ class Task(futures.Future):
         self._log_traceback = False
         if self.done():
             return False
+        if self._must_cancel:
+            # Task was marked as MUST_CANCEL, there is nothing else to do
+            return True
         if self._fut_waiter is not None:
+            if self._fut_waiter.cancelled():
+                # It's not necessary to mark task as MUST_CANCEL
+                # if self._fut_waiter is already cancelled
+                return True
             if self._fut_waiter.cancel():
                 # Leave self._fut_waiter; it may be a Task that
                 # catches and ignores the cancellation so we may have
@@ -164,12 +171,17 @@ class Task(futures.Future):
     def _step(self, exc=None):
         assert not self.done(), \
             '_step(): already done: {!r}, {!r}'.format(self, exc)
-        if self._must_cancel:
-            if not isinstance(exc, futures.CancelledError):
-                exc = futures.CancelledError()
-            self._must_cancel = False
+        if self._fut_waiter is None:
+            if self._must_cancel:
+                if not isinstance(exc, futures.CancelledError):
+                    exc = futures.CancelledError()
+                self._must_cancel = False
+        else:
+            if not self._must_cancel and isinstance(self._fut_waiter, Task):
+                # Inherit the MUST_CANCEL flag from self._fut_waiter
+                self._must_cancel = self._fut_waiter._must_cancel
+            self._fut_waiter = None
         coro = self._coro
-        self._fut_waiter = None
 
         self.__class__._current_tasks[self._loop] = self
         # Call either coro.throw(exc) or coro.send(None).
@@ -181,12 +193,7 @@ class Task(futures.Future):
             else:
                 result = coro.throw(exc)
         except StopIteration as exc:
-            if self._must_cancel:
-                # Task is cancelled right before coro stops.
-                self._must_cancel = False
-                self.set_exception(futures.CancelledError())
-            else:
-                self.set_result(exc.value)
+            self.set_result(exc.value)
         except futures.CancelledError:
             super().cancel()  # I.e., Future.cancel(self).
         except Exception as exc:
@@ -262,16 +269,16 @@ class Task(futures.Future):
         self = None  # Needed to break cycles when an exception occurs.
 
 
-_PyTask = Task
+# _PyTask = Task
 
 
-try:
-    import _asyncio
-except ImportError:
-    pass
-else:
-    # _CTask is needed for tests.
-    Task = _CTask = _asyncio.Task
+# try:
+#     import _asyncio
+# except ImportError:
+#     pass
+# else:
+#     # _CTask is needed for tests.
+#     Task = _CTask = _asyncio.Task
 
 
 # wait() and as_completed() similar to those in PEP 3148.
